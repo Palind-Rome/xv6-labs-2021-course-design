@@ -144,6 +144,20 @@ found:
   return p;
 }
 
+// get number of NOT UNUSED process
+uint64
+nproc(void) {
+  uint64 cnt = 0;
+  struct proc *p;
+  for (p = proc; p < &proc[NPROC]; p++) {
+    acquire(&p->lock);
+    if (p->state != UNUSED)
+      cnt++;
+    release(&p->lock);
+  }
+  return cnt;
+}
+
 // free a proc structure and the data hanging from it,
 // including user pages.
 // p->lock must be held.
@@ -302,6 +316,9 @@ fork(void)
   np->cwd = idup(p->cwd);
 
   safestrcpy(np->name, p->name, sizeof(p->name));
+  
+  // copy parent trace mask
+  np->tracemask = p->tracemask;
 
   pid = np->pid;
 
