@@ -148,8 +148,6 @@ mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
   for(;;){
     if((pte = walk(pagetable, a, 1)) == 0)
       return -1;
-    if(*pte & PTE_V)
-      panic("mappages: remap");
     *pte = PA2PTE(pa) | perm | PTE_V;
     if(a == last)
       break;
@@ -293,8 +291,7 @@ uvmfree(pagetable_t pagetable, uint64 sz)
 
 // Given a parent process's page table, copy
 // its memory into a child's page table.
-// Copies both the page table and the
-// physical memory.
+// Copies only the page table
 // returns 0 on success, -1 on failure.
 // frees any allocated pages on failure.
 int
@@ -303,7 +300,6 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
@@ -311,14 +307,14 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
     if((*pte & PTE_V) == 0)
       panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
-    flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
+    // clear PTE_W flag and mark as COW in child
+    flags = (PTE_FLAGS(*pte) & ~PTE_W) | PTE_COW;
+    // map to same physical page
+    if (mappages(new, i, PGSIZE, pa, flags) != 0)
       goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
-      goto err;
-    }
+    // clear PTE_W flag and mark as COW in parent
+    *pte = (*pte & ~PTE_W) | PTE_COW;
+    kincr_refcount(pa);
   }
   return 0;
 
@@ -347,9 +343,20 @@ int
 copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
   uint64 n, va0, pa0;
+  pte_t *pte;
 
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
+    if (va0 >= MAXVA)
+      return -1;
+    pte = walk(pagetable, va0, 0);
+    if(pte == 0 || ((*pte & PTE_V) == 0) || ((*pte & PTE_U) == 0))
+      return -1;
+    if ((*pte & PTE_COW)) {
+      if (alloc_cow(pagetable, va0) < 0)
+        return -1;
+    }
+
     pa0 = walkaddr(pagetable, va0);
     if(pa0 == 0)
       return -1;
@@ -431,4 +438,76 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   } else {
     return -1;
   }
+}
+
+/**
+ * alloc new physical page for va if more than one reference to
+ * the original pa,
+ * otherwise, remap to original pa.
+ * return 0 on success, -1 on fail
+ * 
+ * NOTE:
+ * va will not be page aligned
+ * so mappages should take care of page alignment for va
+ */
+int
+alloc_cow(pagetable_t pagetable, uint64 va)
+{
+  if (va >= MAXVA)
+    return -1;
+  pte_t *pte = walk(pagetable, va, 0);
+  if (pte == 0)
+    return -1;
+  // check if is COW pte
+  if ((*pte & PTE_COW) == 0)
+    return -1;
+  
+  uint64 pa = PTE2PA(*pte);
+  // remove COW flag and enable W flag
+  uint flags = (PTE_FLAGS(*pte) & ~PTE_COW) | PTE_W;
+
+  #ifdef DEBUG
+  kcheck_invariant();
+  #endif
+
+  /**
+   * check refcount of pa
+   * if is the last reference, don't alloc new physical page, just remap
+   * otherwise, decrease refcount
+   * 
+   * if check and decr SEPERATELY,
+   * in multi-cpu arch, it is possible that
+   * CPU1: check get refcount == 2, so kalloc new page and mappages, but no decr yet, at the same time
+   * CPU2: check get refcount == 2, so it also kalloc new page, which is unnecessary,
+   *        and will run out of memory in the case of user/cowtest.c:threetest()
+   */
+  if (kcheck_and_decr_refcount(pa) == 1) {
+    if (mappages(pagetable, PGROUNDDOWN(va), PGSIZE, pa, flags) != 0)
+      return -1;
+
+    #ifdef DEBUG
+    kcheck_invariant();
+    #endif
+
+    return 0;
+  }
+
+  char *mem;
+  if ((mem = kalloc()) == 0)
+    return -1;
+  
+  // copy physical memory lazily
+  memmove(mem, (char *)pa, PGSIZE);
+
+  // now, map va to new pa
+  if (mappages(pagetable, PGROUNDDOWN(va), PGSIZE, (uint64)mem, flags) != 0) {
+    kfree(mem);
+    return -1;
+  }
+
+  #ifdef DEBUG
+  kcheck_invariant();
+  #endif
+
+  return 0;
 }
