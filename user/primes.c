@@ -5,7 +5,7 @@
 #define INT_SIZE sizeof(int)
 #define PRIME_END 35
 
-void sieve(int *);
+void sieve(int *) __attribute__((noreturn));
 
 int main(int argc, char *argv[]) {
   int i;
