@@ -1,2 +1,16 @@
-skipped.
-It is graded manually
+Q: Which other xv6 system call(s) could be made faster using this shared page? Explain how.
+A: Other read-only, frequently requested process data can use the same technique. For example,
+   getppid() could read a parent PID stored by the kernel, and uptime() could read a
+   kernel-maintained tick count. The kernel would publish the values in a user-readable,
+   non-writable page so the user library can return them without an ecall. Calls whose result
+   requires permissions, side effects, blocking, or complex mutable kernel state are unsuitable.
+
+Q: Explain the output of vmprint in terms of Figure 3-4. What does page 0 contain?
+   What is in page 2? When running in user mode, could the process read/write the
+   memory mapped by page 1? What does the third-to-last page contain?
+A: vmprint displays the three Sv39 page-table levels: each non-leaf PTE points to the next
+   level, and each leaf PTE maps a virtual page to a physical page. Page 0 contains init's
+   program text and initial data. Page 1 is the guard page below the user stack; its PTE lacks
+   PTE_U, so user mode can neither read nor write it. Page 2 is the user stack. The third-to-last
+   mapped page is USYSCALL, which contains struct usyscall and is user-readable but not writable.
+   The final two mappings are TRAPFRAME and TRAMPOLINE.
